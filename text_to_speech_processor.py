@@ -45,16 +45,16 @@ class TextToSpeechProcessor:
                 
         return result
     
-    def generate_speech(self, text: str, **generation_params) -> Tuple[int, np.ndarray]:
+    def generate_speech(self, text: str, **generation_params) -> str:
         """
-        テキストから音声を生成
+        テキストから音声を生成してファイルパスを返す
         
         Args:
             text: 音声化するテキスト
             **generation_params: 音声生成パラメータ
             
         Returns:
-            Tuple[int, np.ndarray]: (sample_rate, audio_array)
+            str: 生成された音声ファイルのパス
         """
         # デフォルトパラメータ
         params = {
@@ -68,7 +68,8 @@ class TextToSpeechProcessor:
         params.update(generation_params)
         
         try:
-            result = self.client.predict(
+            # client.predict()はwav_file_pathと不要な値を返す
+            wav_file_path, _ = self.client.predict(
                 text,                          # text
                 "",                           # reference_id
                 None,                         # reference_audio
@@ -83,14 +84,27 @@ class TextToSpeechProcessor:
                 api_name="/predict"
             )
             
-            audio_data, error = result
-            if error:
-                raise Exception(f"音声生成エラー: {error}")
-                
-            return audio_data  # (sample_rate, audio_array)
+            return wav_file_path
             
         except Exception as e:
             print(f"音声生成に失敗しました: {e}")
+            raise
+    
+    def load_audio_file(self, file_path: str) -> Tuple[np.ndarray, int]:
+        """
+        音声ファイルを読み込む
+        
+        Args:
+            file_path: 音声ファイルのパス
+            
+        Returns:
+            Tuple[np.ndarray, int]: (audio_array, sample_rate)
+        """
+        try:
+            audio_array, sample_rate = sf.read(file_path)
+            return audio_array, sample_rate
+        except Exception as e:
+            print(f"音声ファイルの読み込みに失敗しました: {e}")
             raise
     
     def generate_silence(self, duration_ms: int, sample_rate: int) -> np.ndarray:
@@ -133,46 +147,62 @@ class TextToSpeechProcessor:
         # 音声データを格納するリスト
         audio_segments = []
         sample_rate = None
+        temp_files = []  # 一時ファイルの管理
         
-        for i, (content, segment_type) in enumerate(segments):
-            if segment_type == "text":
-                print(f"音声生成中 ({i+1}/{len(segments)}): {content}")
-                
-                # 音声生成
-                sr, audio_array = self.generate_speech(content, **generation_params)
-                
-                if sample_rate is None:
-                    sample_rate = sr
-                elif sample_rate != sr:
-                    print(f"警告: サンプルレートが異なります ({sample_rate} vs {sr})")
-                
-                audio_segments.append(audio_array)
-                print(f"音声生成完了: {len(audio_array)} samples")
-                
-            elif segment_type == "time":
-                if sample_rate is None:
-                    sample_rate = self.default_sample_rate
-                
-                print(f"無音追加: {content}ms")
-                silence = self.generate_silence(content, sample_rate)
-                audio_segments.append(silence)
-                print(f"無音生成完了: {len(silence)} samples")
-        
-        # 全ての音声セグメントを結合
-        if not audio_segments:
-            raise ValueError("音声セグメントが見つかりません")
-        
-        print("音声データを結合中...")
-        combined_audio = np.concatenate(audio_segments)
-        
-        # ファイルに保存
-        sf.write(output_path, combined_audio, sample_rate)
-        
-        total_duration = len(combined_audio) / sample_rate
-        print(f"音声結合完了！")
-        print(f"出力ファイル: {output_path}")
-        print(f"総再生時間: {total_duration:.2f}秒")
-        print(f"サンプルレート: {sample_rate}Hz")
+        try:
+            for i, (content, segment_type) in enumerate(segments):
+                if segment_type == "text":
+                    print(f"音声生成中 ({i+1}/{len(segments)}): {content}")
+                    
+                    # 音声生成（ファイルパスが返される）
+                    wav_file_path = self.generate_speech(content, **generation_params)
+                    temp_files.append(wav_file_path)
+                    
+                    # 音声ファイルを読み込み
+                    audio_array, sr = self.load_audio_file(wav_file_path)
+                    
+                    if sample_rate is None:
+                        sample_rate = sr
+                    elif sample_rate != sr:
+                        print(f"警告: サンプルレートが異なります ({sample_rate} vs {sr})")
+                    
+                    audio_segments.append(audio_array)
+                    print(f"音声生成完了: {len(audio_array)} samples")
+                    
+                elif segment_type == "time":
+                    if sample_rate is None:
+                        sample_rate = self.default_sample_rate
+                    
+                    print(f"無音追加: {content}ms")
+                    silence = self.generate_silence(content, sample_rate)
+                    audio_segments.append(silence)
+                    print(f"無音生成完了: {len(silence)} samples")
+            
+            # 全ての音声セグメントを結合
+            if not audio_segments:
+                raise ValueError("音声セグメントが見つかりません")
+            
+            print("音声データを結合中...")
+            combined_audio = np.concatenate(audio_segments)
+            
+            # ファイルに保存
+            sf.write(output_path, combined_audio, sample_rate)
+            
+            total_duration = len(combined_audio) / sample_rate
+            print(f"音声結合完了！")
+            print(f"出力ファイル: {output_path}")
+            print(f"総再生時間: {total_duration:.2f}秒")
+            print(f"サンプルレート: {sample_rate}Hz")
+            
+        finally:
+            # 一時ファイルを削除
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                        print(f"一時ファイルを削除: {temp_file}")
+                except Exception as e:
+                    print(f"一時ファイルの削除に失敗: {temp_file}, エラー: {e}")
         
         return output_path
 
